@@ -10,3 +10,10 @@ __pycache__
 
 mini-swe-agent/
 SWE-bench/
+runs/
+# Pipeline artifacts (generated, bulky - don't commit)
+runs/
+mlflow.db
+mlartifacts/
+mlruns/
+airflow/
