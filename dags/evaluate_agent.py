@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from airflow.decorators import dag, task
 from airflow.models.param import Param
+from airflow.providers.docker.operators.docker import DockerOperator
+from docker.types import Mount
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = PROJECT_ROOT / "runs"
@@ -66,42 +68,76 @@ def evaluate_agent():
     MINI_SWE_AGENT_ROOT = PROJECT_ROOT.parent / "mini-swe-agent"
     SWEBENCH_CONFIG = MINI_SWE_AGENT_ROOT / "src/minisweagent/config/benchmarks/swebench.yaml"
 
-    @task(retries=3, retry_delay=timedelta(minutes=2), execution_timeout=timedelta(minutes=30))
-    def run_agent(run_config: dict) -> str:
-        run_id = run_config["run_id"]
-        out_dir = RUNS_ROOT / run_id / "run-agent"
-        out_dir.mkdir(parents=True, exist_ok=True)
 
-        cmd = [
+    # @task(retries=3, retry_delay=timedelta(minutes=2), execution_timeout=timedelta(minutes=30))
+    # def run_agent(run_config: dict) -> str:
+    #     run_id = run_config["run_id"]
+    #     out_dir = RUNS_ROOT / run_id / "run-agent"
+    #     out_dir.mkdir(parents=True, exist_ok=True)
+
+    #     cmd = [
+    #         "uv", "run", "mini-extra", "swebench",
+    #         "--subset",  run_config["subset"],
+    #         "--split",   run_config["split"],
+    #         "--model",   run_config["model"],
+    #         "--slice",   run_config["task_slice"],
+    #         "--config",  str(SWEBENCH_CONFIG),
+    #         "--workers", str(run_config["workers"]),
+    #         "-o",        str(out_dir),
+    #     ]
+    #     print(f"[run_agent] {' '.join(cmd)}")
+
+    #     subprocess.run(
+    #         cmd,
+    #         cwd=PROJECT_ROOT,
+    #         check=True,
+    #         env={**os.environ, "MSWEA_COST_TRACKING": "ignore_errors"},
+    #     )
+
+    #     preds = out_dir / "preds.json"
+    #     if not preds.exists():
+    #         raise FileNotFoundError(f"[run_agent] expected predictions at {preds}, none found")
+    #     print(f"[run_agent] predictions at {preds}")
+    #     return str(preds)
+    run_agent = DockerOperator(
+        task_id="run_agent",
+        image="mlops-agent",
+        api_version="auto",
+        auto_remove="success",
+        docker_url="unix://var/run/docker.sock",
+        network_mode="bridge",
+        mount_tmp_dir=False,
+        working_dir=str(PROJECT_ROOT),
+        mounts=[
+            Mount(source="/var/run/docker.sock", target="/var/run/docker.sock", type="bind"),
+            Mount(source=str(PROJECT_ROOT), target=str(PROJECT_ROOT), type="bind"),
+            Mount(source=str(MINI_SWE_AGENT_ROOT), target=str(MINI_SWE_AGENT_ROOT), type="bind"),
+        ],
+        environment={
+            "NEBIUS_API_KEY": os.environ.get("NEBIUS_API_KEY", ""),
+            "MSWEA_COST_TRACKING": "ignore_errors",
+        },
+        command=[
             "uv", "run", "mini-extra", "swebench",
-            "--subset",  run_config["subset"],
-            "--split",   run_config["split"],
-            "--model",   run_config["model"],
-            "--slice",   run_config["task_slice"],
-            "--config",  str(SWEBENCH_CONFIG),
-            "--workers", str(run_config["workers"]),
-            "-o",        str(out_dir),
-        ]
-        print(f"[run_agent] {' '.join(cmd)}")
-
-        subprocess.run(
-            cmd,
-            cwd=PROJECT_ROOT,
-            check=True,
-            env={**os.environ, "MSWEA_COST_TRACKING": "ignore_errors"},
-        )
-
-        preds = out_dir / "preds.json"
-        if not preds.exists():
-            raise FileNotFoundError(f"[run_agent] expected predictions at {preds}, none found")
-        print(f"[run_agent] predictions at {preds}")
-        return str(preds)
+            "--subset", "{{ ti.xcom_pull(task_ids='prepare_run')['subset'] }}",
+            "--split", "{{ ti.xcom_pull(task_ids='prepare_run')['split'] }}",
+            "--model", "{{ ti.xcom_pull(task_ids='prepare_run')['model'] }}",
+            "--slice", "{{ ti.xcom_pull(task_ids='prepare_run')['task_slice'] }}",
+            "--config", str(SWEBENCH_CONFIG),
+            "--workers", "{{ ti.xcom_pull(task_ids='prepare_run')['workers'] }}",
+            "-o", str(RUNS_ROOT) + "/{{ ti.xcom_pull(task_ids='prepare_run')['run_id'] }}/run-agent",
+        ],
+        retries=3,
+        retry_delay=timedelta(minutes=2),
+        execution_timeout=timedelta(minutes=30),
+    )
 
     @task(retries=3, retry_delay=timedelta(minutes=2), execution_timeout=timedelta(minutes=30))
-    def run_eval(run_config: dict, preds_path: str) -> str:
+    def run_eval(run_config: dict) -> str:
         run_id = run_config["run_id"]
         eval_dir = RUNS_ROOT / run_id / "run-eval"
         eval_dir.mkdir(parents=True, exist_ok=True)
+        preds_path = RUNS_ROOT / run_id / "run-agent" / "preds.json"
 
         # subset 'verified' -> the Verified dataset; map here so the param drives it
         dataset = "princeton-nlp/SWE-bench_Verified"
@@ -206,9 +242,11 @@ def evaluate_agent():
         return metrics
     
     cfg = prepare_run()
-    preds_path = run_agent(cfg)
-    eval_dir = run_eval(cfg, preds_path)
+    eval_dir = run_eval(cfg)
     metrics = summarize_and_log(cfg, eval_dir)
+
+    # explicit ordering: prepare_run -> run_agent (DockerOperator) -> run_eval -> summarize
+    cfg >> run_agent >> eval_dir
 
 
 
