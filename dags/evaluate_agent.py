@@ -1,9 +1,8 @@
 import os
 import json
 import subprocess  
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-
 from airflow.decorators import dag, task
 from airflow.models.param import Param
 
@@ -30,7 +29,7 @@ RUNS_ROOT = PROJECT_ROOT / "runs"
 )
 def evaluate_agent():
 
-    @task
+    @task(retries=1, retry_delay=timedelta(seconds=30))
     def prepare_run(**context) -> dict:
         params = context["params"]
 
@@ -67,7 +66,7 @@ def evaluate_agent():
     MINI_SWE_AGENT_ROOT = PROJECT_ROOT.parent / "mini-swe-agent"
     SWEBENCH_CONFIG = MINI_SWE_AGENT_ROOT / "src/minisweagent/config/benchmarks/swebench.yaml"
 
-    @task
+    @task(retries=3, retry_delay=timedelta(minutes=2), execution_timeout=timedelta(minutes=30))
     def run_agent(run_config: dict) -> str:
         run_id = run_config["run_id"]
         out_dir = RUNS_ROOT / run_id / "run-agent"
@@ -98,7 +97,7 @@ def evaluate_agent():
         print(f"[run_agent] predictions at {preds}")
         return str(preds)
 
-    @task
+    @task(retries=3, retry_delay=timedelta(minutes=2), execution_timeout=timedelta(minutes=30))
     def run_eval(run_config: dict, preds_path: str) -> str:
         run_id = run_config["run_id"]
         eval_dir = RUNS_ROOT / run_id / "run-eval"
@@ -122,7 +121,7 @@ def evaluate_agent():
         print(f"[run_eval] eval outputs under {eval_dir}")
         return str(eval_dir)
     
-    @task
+    @task(retries=2, retry_delay=timedelta(seconds=30), execution_timeout=timedelta(minutes=5))
     def summarize_and_log(run_config: dict, eval_dir_str: str) -> dict:
         import glob
         run_id = run_config["run_id"]
